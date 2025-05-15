@@ -1,6 +1,7 @@
 import tkinter as tk
 from tkinter import ttk, messagebox
 from pymavlink import mavutil
+from pyproj import Proj
 import threading
 import time
 import math
@@ -20,11 +21,66 @@ class MavlinkGroundControl:
         
         # Veri değişkenleri
         self.attitude_data = {'roll': 0, 'pitch': 0, 'yaw': 0}
-        self.gps_data = {'lat': 0, 'lon': 0, 'alt': 0, 'satellites': 0}
+        self.gps_data = {'lat': 40.2318256, 'lon': 29.00003, 'alt': 0, 'satellites': 0}
         self.battery_data = {'voltage': 0, 'current': 0, 'remaining': 0}
         self.system_status = "Bağlı Değil"
         self.flight_mode = "N/A"
         self.heartbeat_received = False
+        self.altitude_agl = 0  # Yer seviyesine göre yükseklik
+        self.home_lat = 41.3622186
+        self.home_lon = 36.1826348
+        self.last_update_time = 0
+        self.other_planes = {
+            "konumBilgileri" : [
+                {
+                "takim_numarasi": 1,
+                "iha_enlem": 40.2318256,
+                "iha_boylam": 29.00993,
+                "iha_irtifa": 36.0,
+                "iha_dikilme": -8.0,
+                "iha_yonelme": 127,
+                "iha_yatis": 19.0,
+                "iha_hizi": 41.0,
+                "zaman_farki": 467
+                }
+            ]
+        }
+        self.qrcode = {
+            "qrEnlem": 40.2326882,
+            "qrBoylam": 29.00675778
+        }
+        self.hss_kordinat = [
+            {
+            "id": 0,
+            "hssEnlem": 40.23260922,
+            "hssBoylam": 29.00573015,
+            "hssYaricap": 50
+            },
+            {
+            "id": 1,
+            "hssEnlem": 40.23351019,
+            "hssBoylam": 28.99976492,
+            "hssYaricap": 50
+            },
+            {
+            "id": 2,
+            "hssEnlem": 40.23105297,
+            "hssBoylam": 29.00744677,
+            "hssYaricap": 75
+            },
+            {
+            "id": 3,
+            "hssEnlem": 40.23090554,
+            "hssBoylam": 29.00221109,
+            "hssYaricap": 150
+            }
+        ]
+        
+        # Arayüz bilgileri
+        self.zoom_factor = 1  # Varsayılan değer
+        self.view_offset_x = 0  # X ekseninde kaydırma miktarı (pixel)
+        self.view_offset_y = 0  # Y ekseninde kaydırma miktarı (pixel)
+        self.proj = Proj(proj='utm', zone=35, ellps='WGS84')
         
         # Arayüz oluştur
         self.create_widgets()
@@ -32,6 +88,12 @@ class MavlinkGroundControl:
         # Veri güncelleme thread'i
         self.update_thread = None
         self.running = False
+        
+        # UI güncelleme thread'i
+        self.update_thread_ui = None
+        self.running_iu = False
+        
+        self.home_x, self.home_y = self.proj(self.home_lon, self.home_lat)
         
     def create_widgets(self):
         # Ana frame'ler
@@ -43,18 +105,18 @@ class MavlinkGroundControl:
         
         self.map_frame = ttk.LabelFrame(self.root, text="Harita", padding=10)
         self.map_frame.grid(row=0, column=1, rowspan=2, padx=10, pady=5, sticky="nsew")
-        
+
         # Bağlantı kontrolleri
         ttk.Label(self.connection_frame, text="Bağlantı:").grid(row=0, column=0)
         self.connection_combo = ttk.Combobox(self.connection_frame, 
                                            values=["udp:127.0.0.1:14550", 
-                                                    "udp:0.0.0.0:14550",
-                                                    "com3:57600",
-                                                    "tcp:127.0.0.1:5760",
-                                                    'tcp:127.0.0.1:5762',
-                                                    'tcp:10.36.245.41:5762'])
+                                                  "udp:0.0.0.0:14550",
+                                                  "com3:57600",
+                                                  "tcp:127.0.0.1:5760",
+                                                  'tcp:127.0.0.1:5762',
+                                                  'tcp:10.36.245.41:5762'])
         self.connection_combo.grid(row=0, column=1, padx=5)
-        self.connection_combo.set("udp:127.0.0.1:14550")
+        self.connection_combo.set("tcp:127.0.0.1:5762")
         
         self.connect_btn = ttk.Button(self.connection_frame, text="Bağlan", command=self.toggle_connection)
         self.connect_btn.grid(row=0, column=2, padx=5)
@@ -62,12 +124,25 @@ class MavlinkGroundControl:
         self.status_label = ttk.Label(self.connection_frame, text="Durum: Bağlı Değil")
         self.status_label.grid(row=1, column=0, columnspan=3, pady=5)
         
+        # ttk.Label(self.connection_frame, text="Server :").grid(row=0, column=3)
+        # self.connect_server = ttk.Entry(self.connection_frame, width=10)
+        # self.connect_server.grid(row=0, column=4, padx=5)
+        
         # Uçuş verileri
         self.create_data_widgets()
         
         # Harita (basit bir canvas)
-        self.map_canvas = tk.Canvas(self.map_frame, width=400, height=600, bg='white')
-        self.map_canvas.pack(fill=tk.BOTH, expand=True)
+        self.current_map = True
+        self.map_canvas = {
+            True : tk.Canvas(self.map_frame, width=400, height=600, bg='white'),
+            False : tk.Canvas(self.map_frame, width=400, height=600, bg='white')    
+        }
+        for map in self.map_canvas.values():
+            map.pack(fill=tk.BOTH, expand=True)
+            map.bind("<MouseWheel>", self.on_mousewheel)
+            map.bind("<ButtonPress-1>", self.on_drag_start)
+            map.bind("<B1-Motion>", self.on_drag_move)
+
         
         # Komut gönderme
         self.command_frame = ttk.LabelFrame(self.root, text="Komutlar", padding=10)
@@ -93,13 +168,17 @@ class MavlinkGroundControl:
         self.lon_label = ttk.Label(pos_frame, text="0.0")
         self.lon_label.grid(row=1, column=1, sticky="w")
         
-        ttk.Label(pos_frame, text="Yükseklik:").grid(row=2, column=0, sticky="w")
+        ttk.Label(pos_frame, text="Yükseklik (AGL):").grid(row=2, column=0, sticky="w")
         self.alt_label = ttk.Label(pos_frame, text="0.0 m")
         self.alt_label.grid(row=2, column=1, sticky="w")
         
-        ttk.Label(pos_frame, text="Uydu Sayısı:").grid(row=3, column=0, sticky="w")
-        self.sat_label = ttk.Label(pos_frame, text="0")
-        self.sat_label.grid(row=3, column=1, sticky="w")
+        ttk.Label(pos_frame, text="Yükseklik (MSL):").grid(row=3, column=0, sticky="w")
+        self.alt_msl_label = ttk.Label(pos_frame, text="0.0 m")
+        self.alt_msl_label.grid(row=3, column=1, sticky="w")
+        
+        # ttk.Label(pos_frame, text="Uydu Sayısı:").grid(row=4, column=0, sticky="w")
+        # self.sat_label = ttk.Label(pos_frame, text="0")
+        # self.sat_label.grid(row=4, column=1, sticky="w")
         
         # Attitude verileri
         att_frame = ttk.LabelFrame(self.data_frame, text="Oryantasyon")
@@ -137,6 +216,15 @@ class MavlinkGroundControl:
         self.batt_percent_label = ttk.Label(sys_frame, text="0%")
         self.batt_percent_label.grid(row=3, column=1, sticky="w")
         
+        ttk.Label(sys_frame, text="Son Güncelleme:").grid(row=4, column=0, sticky="w")
+        self.last_update_label = ttk.Label(sys_frame, text="Hiç güncellenmedi")
+        self.last_update_label.grid(row=4, column=1, sticky="w")
+        
+        
+        capture_frame = ttk.LabelFrame(self.data_frame, text="Tekip ekranı")
+        capture_frame.grid(row=2, column=0, columnspan=2, padx=5, pady=5, sticky="nsew")
+        tk.Canvas(capture_frame, width=400, height=280, bg='white').grid(row=0, column=0, sticky="nsew")
+        
         # Grid yapılandırması
         self.data_frame.columnconfigure(0, weight=1)
         self.data_frame.columnconfigure(1, weight=1)
@@ -153,6 +241,18 @@ class MavlinkGroundControl:
         self.set_mode_btn = ttk.Button(self.command_frame, text="Modu Değiştir", 
                                      command=self.set_flight_mode, state=tk.DISABLED)
         self.set_mode_btn.grid(row=0, column=2, padx=5)
+        
+        self.set_mode_btn1 = ttk.Button(self.command_frame, text="Otonom Kalkış", 
+                                     command=self.set_flight_mode, state=tk.DISABLED)
+        self.set_mode_btn1.grid(row=0, column=4, padx=5)
+        
+        self.set_mode_btn2 = ttk.Button(self.command_frame, text="Qr görev", 
+                                     command=self.set_flight_mode, state=tk.DISABLED)
+        self.set_mode_btn2.grid(row=0, column=5, padx=5)
+        
+        self.set_mode_btn3 = ttk.Button(self.command_frame, text="Test", 
+                                     command=self.set_flight_mode, state=tk.DISABLED)
+        self.set_mode_btn3.grid(row=0, column=6, padx=5)
         
         # Arm/Disarm
         self.arm_btn = ttk.Button(self.command_frame, text="ARM", 
@@ -195,29 +295,28 @@ class MavlinkGroundControl:
     
     def connect(self):
         connection_string = self.connection_combo.get()
-        print("burda1")
+        print(connection_string)
         try:
             self.master = mavutil.mavlink_connection(connection_string)
-            print("burda2")
-            self.master.wait_heartbeat()
-            print("burda3")
+            
+            # 3 saniye içinde heartbeat bekleyin
+            start_time = time.time()
+            while time.time() - start_time < 3:
+                msg = self.master.recv_match(type='HEARTBEAT', blocking=True, timeout=1)
+                if msg:
+                    break
+                else:
+                    raise ConnectionError("Heartbeat alınamadı - cihaz bağlı mı?")
+            
             self.connected = True
-            print("burda4")
             self.heartbeat_received = True
-            print("burda5")
             self.vehicle_type = mavutil.mavlink.enums['MAV_TYPE'][self.master.mav_type].name
-            print("burda6")
             self.vehicle_system = self.master.sysid
-            print("burda7")
             self.vehicle_component = self.master.param_sysid[1]
-            print("burda8")
             
             self.status_label.config(text=f"Durum: Bağlı ({self.vehicle_type}, SYS:{self.vehicle_system}, COMP:{self.vehicle_component})")
-            print("burda9")
             self.connect_btn.config(text="Bağlantıyı Kes")
-            print("burda10")
             self.sys_status_label.config(text="Bağlandı")
-            print("burda11")
             
             # Komut butonlarını aktif et
             self.set_mode_btn.config(state=tk.NORMAL)
@@ -227,11 +326,13 @@ class MavlinkGroundControl:
             
             # Veri güncelleme thread'ini başlat
             self.running = True
-            print("burda12")
             self.update_thread = threading.Thread(target=self.update_data, daemon=True)
-            print("burda13")
             self.update_thread.start()
-            print("burda14")
+            
+            # UI güncelleme thread'ini başlat
+            self.running_iu = True
+            self.update_thread_ui = threading.Thread(target=self.update_ui, daemon=True)
+            self.update_thread_ui.start()
             
         except Exception as e:
             messagebox.showerror("Bağlantı Hatası", f"Bağlantı kurulamadı: {str(e)}")
@@ -258,21 +359,17 @@ class MavlinkGroundControl:
         self.send_wp_btn.config(state=tk.DISABLED)
     
     def update_data(self):
+        last_msg_time = time.time()
         while self.running:
             try:
-                # Mesajları oku
-                msg = self.master.recv_match(blocking=False)
+                msg = self.master.recv_match(blocking=True, timeout=1.0)
                 if msg:
+                    last_msg_time = time.time()
                     self.process_message(msg)
-                
-                # UI güncelleme
-                self.update_ui()
-                
-                # Haritayı güncelle
-                self.update_map()
-                
-                time.sleep(0.1)
-                
+                else:
+                    # 5 saniyeden fazla mesaj gelmezse bağlantı sorunu uyarısı
+                    if time.time() - last_msg_time > 5:
+                        self.system_status = "Bağlantı Sorunu"                
             except Exception as e:
                 print(f"Veri güncelleme hatası: {str(e)}")
                 time.sleep(1)
@@ -282,8 +379,22 @@ class MavlinkGroundControl:
         
         if msg_type == "HEARTBEAT":
             self.heartbeat_received = True
-            self.system_status = mavutil.mavlink.enums['MAV_STATE'][msg.system_status].name
-            self.flight_mode = mavutil.mavlink.enums['MAV_MODE_FLAG'][msg.base_mode].name
+            try:
+                self.system_status = mavutil.mavlink.enums['MAV_STATE'][msg.system_status].name
+                # Uçuş modunu doğru şekilde almak için:
+                custom_mode = msg.custom_mode
+                mode_mapping = self.master.mode_mapping()
+                if mode_mapping:
+                    for mode_name, mode_value in mode_mapping.items():
+                        if custom_mode == mode_value:
+                            self.flight_mode = mode_name
+                            break
+                    else:
+                        self.flight_mode = f"Bilinmeyen Mod ({custom_mode})"
+                else:
+                    self.flight_mode = "Mod Bilgisi Yok"
+            except Exception as e:
+                print(f"Heartbeat işleme hatası: {str(e)}")
             
         elif msg_type == "ATTITUDE":
             self.attitude_data['roll'] = math.degrees(msg.roll)
@@ -302,18 +413,27 @@ class MavlinkGroundControl:
             self.battery_data['remaining'] = msg.battery_remaining
             
         elif msg_type == "VFR_HUD":
-            self.altitude = msg.alt
-            self.airspeed = msg.airspeed
-            self.groundspeed = msg.groundspeed
-            self.heading = msg.heading
-            self.throttle = msg.throttle
-            
+            self.altitude_agl = msg.alt  # Yer seviyesine göre yükseklik
+    
     def update_ui(self):
+        while self.running_iu:
+            try:
+                time.sleep(0.1)
+                self.update_data_ui()
+                self.update_map()
+            except Exception as e:
+                print(f"hata: {str(e)}")
+                time.sleep(1)
+    
+    def update_data_ui(self):
+        self.last_update_time = time.time()
+        
         # GPS verileri
         self.lat_label.config(text=f"{self.gps_data['lat']:.6f}")
         self.lon_label.config(text=f"{self.gps_data['lon']:.6f}")
-        self.alt_label.config(text=f"{self.gps_data['alt']:.1f} m")
-        self.sat_label.config(text=f"{self.gps_data['satellites']}")
+        self.alt_label.config(text=f"{self.altitude_agl:.1f} m")
+        self.alt_msl_label.config(text=f"{self.gps_data['alt']:.1f} m")
+        # self.sat_label.config(text=f"{self.gps_data['satellites']}")
         
         # Attitude verileri
         self.roll_label.config(text=f"{self.attitude_data['roll']:.1f}°")
@@ -325,35 +445,95 @@ class MavlinkGroundControl:
         self.flight_mode_label.config(text=f"{self.flight_mode}")
         self.volt_label.config(text=f"{self.battery_data['voltage']:.1f} V")
         self.batt_percent_label.config(text=f"{self.battery_data['remaining']}%")
+        self.last_update_label.config(text=time.strftime("%H:%M:%S", time.localtime()))
         
         # Arm/Disarm butonu güncelleme
         if self.connected and self.heartbeat_received:
-            if self.flight_mode and 'MAV_MODE_FLAG_SAFETY_ARMED' in self.flight_mode:
+            if self.flight_mode and 'MAV_MODE_FLAG_SAFETY_ARMED' in self.system_status:
                 self.arm_btn.config(text="DISARM")
             else:
                 self.arm_btn.config(text="ARM")
     
     def update_map(self):
-        self.map_canvas.delete("all")
+        self.map_canvas[self.current_map].pack(fill=tk.BOTH, expand=True)
+        self.current_map = not self.current_map
+        self.map_canvas[self.current_map].pack_forget()
         
-        # Basit bir harita çizimi
-        width = self.map_canvas.winfo_width()
-        height = self.map_canvas.winfo_height()
+        self.map_canvas[self.current_map].delete("all")
+        width = self.map_canvas[self.current_map].winfo_width()
+        height = self.map_canvas[self.current_map].winfo_height()
         
-        # Merkez noktası
-        center_x = width // 2
-        center_y = height // 2
+        # Grid çiz
+        for i in range(0, width, 50):
+            line_x = i + self.view_offset_x % 50
+            self.map_canvas[self.current_map].create_line(line_x, 0, line_x, height, fill="lightgray")
+            # self.map_canvas.create_text(i, 10, anchor="nw", text=self.gps_data["lon"], font=("Arial", 10), fill="black")
+        for i in range(0, height, 50):
+            line_y = i + self.view_offset_y % 50
+            self.map_canvas[self.current_map].create_line(0, line_y, width, line_y, fill="lightgray")
+            # self.map_canvas.create_text(10, i, anchor="nw", text=self.gps_data["lat"], font=("Arial", 10), fill="black")
+            
+        for hss in self.hss_kordinat:
+            x, y = self.proj(hss["hssBoylam"], hss["hssEnlem"])
+            hss_x = width // 2 + int((x - self.home_x) * self.zoom_factor) + self.view_offset_x
+            hss_y = height // 2 - int((y - self.home_y) * self.zoom_factor) + self.view_offset_y
+            hss_size = max(3, hss["hssYaricap"] * self.zoom_factor)
+            self.map_canvas[self.current_map].create_oval(hss_x - hss_size, hss_y - hss_size, hss_x + hss_size, hss_y + hss_size, fill="yellow")
+
+        x, y = self.proj(self.qrcode["qrBoylam"], self.qrcode["qrEnlem"])
+        qrsize = max(5, min(20, 10 * self.zoom_factor))  
+        qr_x = width // 2 + int((x - self.home_x) * self.zoom_factor) + self.view_offset_x
+        qr_y = height // 2 - int((y - self.home_y) * self.zoom_factor) + self.view_offset_y      
+        self.map_canvas[self.current_map].create_rectangle(qr_x - qrsize, qr_y - qrsize, qr_x + qrsize, qr_y + qrsize, fill="black")
         
-        # Drone pozisyonu (basitçe merkezde gösteriyoruz)
-        drone_size = 10
-        self.map_canvas.create_oval(center_x - drone_size, center_y - drone_size,
-                                   center_x + drone_size, center_y + drone_size,
-                                   fill="red", outline="black")
+        # Drone pozisyonu (basit hareket simülasyonu)
+        x, y = self.proj(self.gps_data['lon'], self.gps_data['lat'])
+        if self.home_lat != 0 and self.home_lon != 0:
+            drone_x = width // 2 + int((x - self.home_x) * self.zoom_factor) + self.view_offset_x
+            drone_y = height // 2 - int((y - self.home_y) * self.zoom_factor) + self.view_offset_y
+        else:
+            drone_x = width // 2
+            drone_y = height // 2
         
-        # Koordinat bilgisi
-        self.map_canvas.create_text(10, 10, anchor="nw", 
-                                   text=f"Lat: {self.gps_data['lat']:.6f}\nLon: {self.gps_data['lon']:.6f}",
-                                   font=("Arial", 10))
+        # Sınır kontrolü
+        drone_x = max(20, min(width-20, drone_x))
+        drone_y = max(20, min(height-20, drone_y))
+        
+        # Drone çiz
+        drone_size = max(5, min(20, 10 * self.zoom_factor))
+        self.map_canvas[self.current_map].create_oval(drone_x - drone_size, drone_y - drone_size, drone_x + drone_size, drone_y + drone_size, 
+                                  fill="red", outline="black")
+        # Yönü göster
+        arrow_len = 20
+        end_x = drone_x + arrow_len * math.sin(math.radians(self.attitude_data['yaw']))
+        end_y = drone_y - arrow_len * math.cos(math.radians(self.attitude_data['yaw']))
+        self.map_canvas[self.current_map].create_line(drone_x, drone_y, end_x, end_y, arrow=tk.LAST, width=2)
+        
+        for drone_data in self.other_planes["konumBilgileri"]:
+            # Diğer drone'un konumunu hesapla
+            x, y = self.proj(drone_data['iha_boylam'], drone_data['iha_enlem'])
+            otherdrone_x = width // 2 + int((x - self.home_x) * self.zoom_factor) + self.view_offset_x
+            otherdrone_y = height // 2 - int((y - self.home_y) * self.zoom_factor) + self.view_offset_y
+            # Diğer drone'u çiz
+            otherdrone_size = max(5, min(20, 10 * self.zoom_factor))
+            self.map_canvas[self.current_map].create_oval(
+                otherdrone_x - otherdrone_size, otherdrone_y - otherdrone_size, 
+                otherdrone_x + otherdrone_size, otherdrone_y + otherdrone_size, 
+                fill="blue", outline="black"
+            )
+            # Diğer dronun yönünü göster
+            arrow_len = 20
+            end_x = otherdrone_x + arrow_len * math.cos(math.radians(drone_data['iha_yonelme'] - 90))
+            end_y = otherdrone_y - arrow_len * math.sin(math.radians(drone_data['iha_yonelme'] - 90))
+            self.map_canvas[self.current_map].create_line(otherdrone_x, otherdrone_y, end_x, end_y, arrow=tk.LAST, width=2)
+        
+        
+        # Bilgiler
+        # info_text = f"Lat: {self.gps_data['lat']:.6f}\nLon: {self.gps_data['lon']:.6f}\n"
+        # info_text += f"Yükseklik: {self.altitude_agl:.1f}m\n"
+        # info_text += f"Mod: {self.flight_mode}"
+        # self.map_canvas.create_text(10, 10, anchor="nw", text=info_text, 
+        #                           font=("Arial", 10), fill="black")
     
     def set_flight_mode(self):
         mode = self.mode_combo.get()
@@ -406,6 +586,41 @@ class MavlinkGroundControl:
         except Exception as e:
             messagebox.showerror("Hata", f"Waypoint gönderilemedi: {str(e)}")
 
+    def on_mousewheel(self, event):
+        # Yukarı scroll (zoom in)
+        if event.delta > 0:
+            self.zoom_factor *= 1.1  # %10 büyüt
+            self.view_offset_x *= 1.1
+            self.view_offset_y *= 1.1
+        # Aşağı scroll (zoom out)
+        elif event.delta < 0:
+            self.zoom_factor *= 0.9  # %10 küçült
+            self.view_offset_x *= 0.9
+            self.view_offset_y *= 0.9
+        
+        # Zoom'u güncelle (yeniden çiz)
+        self.update_map()
+        
+    def on_drag_start(self, event):
+        self.last_x = event.x
+        self.last_y = event.y
+
+    def on_drag_move(self, event):
+        # Fare hareket miktarını hesapla
+        dx = event.x - self.last_x
+        dy = event.y - self.last_y
+        
+        # Ofseti güncelle
+        self.view_offset_x += dx
+        self.view_offset_y += dy
+        
+        # Son pozisyonu kaydet
+        self.last_x = event.x
+        self.last_y = event.y
+        
+        # Haritayı yeniden çiz
+        self.update_map()
+        
 if __name__ == "__main__":
     root = tk.Tk()
     app = MavlinkGroundControl(root)
