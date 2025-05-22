@@ -1,1 +1,5 @@
-local/*
+local/
+server/node_modules/
+yer_kontrol/__pycache__/
+env/
+venv/
